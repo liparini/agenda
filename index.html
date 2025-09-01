@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agenda da Carol</title>
+<style>
+body { font-family: Arial, sans-serif; margin:20px; text-align:center; }
+.calendar-container { max-width:950px; margin:0 auto; }
+.calendar { display:grid; grid-template-columns:repeat(7,1fr); gap:5px; }
+.day, .weekday { border:1px solid #ccc; padding:10px; min-height:80px; border-radius:6px; position:relative; }
+.day:hover{background:#f5f5f5; cursor:pointer;}
+.weekday { background:#eee; font-weight:bold; }
+.modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); justify-content:center; align-items:center; }
+.modal-content { background:#fff; padding:20px; width:500px; max-height:80vh; overflow-y:auto; border-radius:8px; text-align:left; }
+.close { float:right; cursor:pointer; font-weight:bold; }
+.event { padding:5px; margin:5px 0; border-radius:5px; color:#fff; cursor:pointer; }
+.event-details { display:flex; flex-wrap:wrap; gap:5px; align-items:center; }
+button { margin:2px; padding:4px 8px; cursor:pointer; border-radius:4px; }
+.full-image-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.9); justify-content:center; align-items:center; }
+.full-image-modal img { max-width:90vw; max-height:90vh; border-radius:8px; }
+.image-container { display:flex; gap:5px; overflow-x:auto; padding:5px 0; max-width:100%; }
+.image-container::-webkit-scrollbar { height:6px; }
+.image-container::-webkit-scrollbar-thumb { background:#888; border-radius:3px; }
+.image-container div { position:relative; display:inline-block; flex:0 0 auto; cursor:grab; }
+.image-container img { width:70px; height:70px; object-fit:cover; border-radius:4px; border:2px solid #fff; transition:transform 0.2s; }
+.image-container img:hover { transform:scale(1.2); }
+.remove-img { position:absolute; top:-5px; right:-5px; background:red; color:white; border-radius:50%; width:18px; height:18px; font-size:12px; text-align:center; line-height:18px; cursor:pointer; z-index:2; }
+.nav { margin-bottom:10px; }
+.notif { position:absolute; top:5px; right:5px; width:20px; height:20px; background:red; color:#fff; border-radius:50%; display:flex; justify-content:center; align-items:center; font-size:12px; font-weight:bold; cursor:default; }
+.new-event { animation: highlight 1s ease-out; }
+@keyframes highlight { 0% { background-color: #ffeb3b; } 50% { background-color: #ffc107; } 100% { background-color: transparent; } }
+.holiday { background-color: #f44336; color: white; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>Agenda da Carol</h1>
+<div class="nav">
+  <button id="prevBtn">« Mês Anterior</button>
+  <span id="currentMonth"></span>
+  <button id="nextBtn">Próximo Mês »</button>
+</div>
+<button id="loginBtn">Entrar como Administrador</button>
+<button id="logoutBtn" style="display:none;">Sair do Administrador</button>
+
+<div class="calendar-container">
+  <div class="calendar" id="calendar"></div>
+</div>
+
+<div id="eventModal" class="modal">
+  <div class="modal-content">
+    <span class="close" id="closeModal">&times;</span>
+    <h2 id="modalDate"></h2>
+    <div id="eventList"></div>
+    <div id="adminControls" style="display:none;">
+      <input type="text" id="eventTitle" placeholder="Título do evento"><br><br>
+      <input type="time" id="eventTime"><br><br>
+      <input type="file" id="eventImages" accept="image/*" multiple><br><br>
+      <button id="saveEventBtn">Salvar</button>
+      <button id="cancelEditBtn">Cancelar Edição</button>
+    </div>
+  </div>
+</div>
+
+<div id="fullImageModal" class="full-image-modal" onclick="this.style.display='none'">
+  <img id="fullImage" alt="Imagem em tela cheia"/>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-storage-compat.js"></script>
+
+<script>
+// ---------------- Firebase ----------------
+const firebaseConfig = {
+  apiKey: "AIzaSyBb2Xjs47vWwiEuLXZunSu67oKzdKYvMeY",
+  authDomain: "agenda-fbf45.firebaseapp.com",
+  projectId: "agenda-fbf45",
+  storageBucket: "agenda-fbf45.appspot.com",
+  messagingSenderId: "1061170361684",
+  appId: "1:1061170361684:web:3a9f86cd7f3fce840a44c1"
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+const storage = firebase.storage();
+
+// ---------------- Variáveis ----------------
+let isAdmin=false;
+let selectedDate=null;
+let editingId=null;
+let colorIndex=0;
+const colors=["#007BFF","#28A745","#DC3545","#FFC107","#6610f2","#20c997","#fd7e14"];
+let currentMonth=new Date().getMonth();
+let currentYear=new Date().getFullYear();
+const weekdays=["Dom","Seg","Ter","Qua","Qui","Sex","Sáb"];
+let unsubscribeGlobal = null;
+
+// ---------------- Util ----------------
+function pad(n){ return String(n).padStart(2,'0'); }
+
+// ---------------- Feriados ----------------
+function getEaster(year){ const f=Math.floor,G=year%19,C=f(year/100),H=(C-f(C/4)-f((8*C+13)/25)+19*G+15)%30,I=H-f(H/28)*(1-f(H/28)*f(29/(H+1))*f((21-G)/11)),J=(year+f(year/4)+I+2-C+f(C/4))%7,L=I-J,month=3+f((L+40)/44),day=L+28-31*f(month/4); return new Date(year,month-1,day); }
+function getCarnival(y){ const d=getEaster(y); d.setDate(d.getDate()-47); return d; }
+function getGoodFriday(y){ const d=getEaster(y); d.setDate(d.getDate()-2); return d; }
+function getCorpusChristi(y){ const d=getEaster(y); d.setDate(d.getDate()+60); return d; }
+function getHolidays(year){
+  const fixed=[{day:1,month:1,name:"Confraternização Universal"},{day:21,month:4,name:"Tiradentes"},{day:1,month:5,name:"Dia do Trabalho"},{day:7,month:9,name:"Independência do Brasil"},{day:12,month:10,name:"Nossa Senhora Aparecida"},{day:2,month:11,name:"Finados"},{day:15,month:11,name:"Proclamação da República"},{day:25,month:12,name:"Natal"}];
+  const easter=getEaster(year),carnival=getCarnival(year),goodFriday=getGoodFriday(year),corpus=getCorpusChristi(year);
+  return fixed.concat([{day:carnival.getDate(),month:carnival.getMonth()+1,name:"Carnaval"},{day:carnival.getDate()+1,month:carnival.getMonth()+1,name:"Carnaval"},{day:goodFriday.getDate(),month:goodFriday.getMonth()+1,name:"Paixão de Cristo"},{day:corpus.getDate(),month:corpus.getMonth()+1,name:"Corpus Christi"}]);
+}
+
+// ---------------- Calendar ----------------
+function generateCalendar() {
+  const calendar = document.getElementById("calendar");
+  calendar.innerHTML = "";
+  document.getElementById("currentMonth").innerText = new Date(currentYear,currentMonth).toLocaleString('pt-BR',{month:'long',year:'numeric'});
+
+  weekdays.forEach(day => {
+    const div = document.createElement("div");
+    div.className = "weekday";
+    div.innerText = day;
+    calendar.appendChild(div);
+  });
+
+  const firstDay = new Date(currentYear,currentMonth,1).getDay();
+  const lastDate = new Date(currentYear,currentMonth+1,0).getDate();
+
+  for(let i=0;i<firstDay;i++) calendar.appendChild(document.createElement("div"));
+
+  const holidays = getHolidays(currentYear);
+
+  for(let day=1; day<=lastDate; day++){
+    const dateKey = `${currentYear}-${pad(currentMonth+1)}-${pad(day)}`;
+    const div = document.createElement("div");
+    div.className="day";
+    div.innerText=day;
+    div.dataset.date = dateKey;
+
+    holidays.forEach(h => { 
+      if(h.day===day && h.month===currentMonth+1){ div.classList.add("holiday"); div.title=h.name; } 
+    });
+
+    div.onclick = () => openModal(dateKey);
+    calendar.appendChild(div);
+  }
+
+  // Atualiza badges imediatamente
+  updateCalendarBadges();
+}
+
+// ---------------- Atualiza badges do calendário ----------------
+function updateCalendarBadges(){
+  db.collection("eventos").onSnapshot(snapshot=>{
+    const eventsByDate = {};
+    snapshot.forEach(doc=>{
+      const data = doc.data();
+      if(!eventsByDate[data.date]) eventsByDate[data.date]=[];
+      eventsByDate[data.date].push(data);
+    });
+
+    document.querySelectorAll(".day").forEach(dayEl=>{
+      const date = dayEl.dataset.date;
+      let notif = dayEl.querySelector(".notif");
+      if(eventsByDate[date]){
+        if(!notif){ notif=document.createElement("div"); notif.className="notif"; dayEl.appendChild(notif); }
+        notif.innerText = eventsByDate[date].length;
+      } else { if(notif) notif.remove(); }
+    });
+  });
+}
+
+// ---------------- Modal ----------------
+function openModal(date){
+  selectedDate = date;
+  editingId = null;
+  document.getElementById("modalDate").innerText = `Eventos de ${date}`;
+  document.getElementById("adminControls").style.display = isAdmin?"block":"none";
+  document.getElementById("eventTitle").value = "";
+  document.getElementById("eventTime").value = "";
+  document.getElementById("eventImages").value = "";
+  document.getElementById("eventModal").style.display = "flex";
+
+  if(unsubscribeGlobal) unsubscribeGlobal();
+  unsubscribeGlobal = db.collection("eventos").where("date","==",selectedDate).onSnapshot(snapshot=>{
+    loadEventsModal(snapshot);
+    updateCalendarBadges();
+  });
+}
+
+document.getElementById("closeModal").onclick = ()=>{ document.getElementById("eventModal").style.display='none'; };
+
+// ---------------- Login ----------------
+document.getElementById("loginBtn").onclick = ()=>{
+  const senha = prompt("Digite a senha de administrador:");
+  if(senha==="agenda@2025"){
+    isAdmin = true;
+    document.getElementById("loginBtn").style.display='none';
+    document.getElementById("logoutBtn").style.display='inline-block';
+  } else alert("Senha incorreta!");
+};
+
+document.getElementById("logoutBtn").onclick = ()=>{
+  isAdmin=false;
+  document.getElementById("loginBtn").style.display='inline-block';
+  document.getElementById("logoutBtn").style.display='none';
+};
+
+// ---------------- Navegação ----------------
+document.getElementById("prevBtn").onclick = ()=>{
+  currentMonth--; if(currentMonth<0){currentMonth=11; currentYear--; } generateCalendar();
+};
+document.getElementById("nextBtn").onclick = ()=>{
+  currentMonth++; if(currentMonth>11){currentMonth=0; currentYear++; } generateCalendar();
+};
+
+// ---------------- Salvar evento ----------------
+document.getElementById("saveEventBtn").onclick = async ()=>{
+  const title = document.getElementById("eventTitle").value.trim();
+  const time = document.getElementById("eventTime").value;
+  const files = document.getElementById("eventImages").files;
+  if(!title){ alert("Digite um título!"); return; }
+
+  let imageUrls = [];
+  for(const file of files){
+    const storageRef = storage.ref(`eventos/${selectedDate}/${Date.now()}_${file.name}`);
+    const snapshot = await storageRef.put(file);
+    const url = await snapshot.ref.getDownloadURL();
+    imageUrls.push(url);
+  }
+
+  let color = colors[colorIndex % colors.length];
+  colorIndex++;
+
+  if(editingId){
+    const docRef = db.collection("eventos").doc(editingId);
+    const docSnap = await docRef.get();
+    let existingImages = docSnap.exists ? docSnap.data().images : [];
+    await docRef.update({title,time,color,images:existingImages.concat(imageUrls)});
+  } else {
+    await db.collection("eventos").add({date:selectedDate,title,time,color,images:imageUrls});
+  }
+
+  document.getElementById("eventTitle").value="";
+  document.getElementById("eventTime").value="";
+  document.getElementById("eventImages").value="";
+};
+
+// ---------------- Cancelar edição ----------------
+document.getElementById("cancelEditBtn").onclick = ()=>{
+  editingId = null;
+  document.getElementById("eventTitle").value="";
+  document.getElementById("eventTime").value="";
+  document.getElementById("eventImages").value="";
+};
+
+// ---------------- Carrega eventos no modal ----------------
+function loadEventsModal(snapshot){
+  const list = document.getElementById("eventList");
+  list.innerHTML="";
+
+  snapshot.docs.sort((a,b)=>{
+    const ta = a.data().time||"99:99";
+    const tb = b.data().time||"99:99";
+    return ta.localeCompare(tb);
+  }).forEach(doc=>{
+    const ev = doc.data();
+    const div = document.createElement("div");
+    div.className="event";
+    div.style.backgroundColor = ev.color;
+
+    const content = document.createElement("div");
+    content.className="event-details";
+
+    const text = document.createElement("span");
+    text.innerText = `${ev.time?ev.time+" - ":""}${ev.title}`;
+    content.appendChild(text);
+
+    const imgContainer = document.createElement("div");
+    imgContainer.className="image-container";
+    ev.images.forEach((url,imgIndex)=>{
+      const imgDiv = document.createElement("div");
+      const img = document.createElement("img");
+      img.src = url;
+      img.onclick = ()=>{ document.getElementById("fullImage").src=url; document.getElementById("fullImageModal").style.display='flex'; };
+      imgDiv.appendChild(img);
+
+      if(isAdmin){
+        imgDiv.draggable=true;
+        imgDiv.addEventListener("dragstart", e=>{ imgDiv.classList.add("dragging"); e.dataTransfer.setData("text/plain",imgIndex); });
+        imgDiv.addEventListener("dragend", ()=>{ imgDiv.classList.remove("dragging"); });
+        imgDiv.addEventListener("dragover", e=>e.preventDefault());
+        imgDiv.addEventListener("drop", e=>{
+          e.preventDefault();
+          const from = parseInt(e.dataTransfer.getData("text/plain"));
+          if(from!==imgIndex){
+            const temp = ev.images[from];
+            ev.images.splice(from,1);
+            ev.images.splice(imgIndex,0,temp);
+            db.collection("eventos").doc(doc.id).update({images: ev.images});
+          }
+        });
+
+        const rm = document.createElement("div");
+        rm.className="remove-img";
+        rm.innerText="×";
+        rm.onclick=(e)=>{
+          e.stopPropagation();
+          ev.images.splice(imgIndex,1);
+          db.collection("eventos").doc(doc.id).update({images: ev.images});
+        };
+        imgDiv.appendChild(rm);
+      }
+
+      imgContainer.appendChild(imgDiv);
+    });
+
+    content.appendChild(imgContainer);
+    div.appendChild(content);
+
+    if(isAdmin){
+      const editBtn = document.createElement("button");
+      editBtn.innerText="Editar";
+      editBtn.onclick = ()=>{
+        editingId = doc.id;
+        document.getElementById("eventTitle").value=ev.title;
+        document.getElementById("eventTime").value=ev.time;
+      };
+      const delBtn = document.createElement("button");
+      delBtn.innerText="Excluir";
+      delBtn.onclick = ()=>{ db.collection("eventos").doc(doc.id).delete(); };
+      div.appendChild(editBtn);
+      div.appendChild(delBtn);
+    }
+
+    list.appendChild(div);
+  });
+}
+
+// ---------------- Inicial ----------------
+generateCalendar();
+</script>
+
+</body>
+</html>
