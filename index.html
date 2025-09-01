@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agenda da Carol</title>
+<style>
+body { font-family: Arial, sans-serif; margin:20px; text-align:center; }
+.calendar-container { max-width:950px; margin:0 auto; }
+.calendar { display:grid; grid-template-columns:repeat(7,1fr); gap:5px; }
+.day, .weekday { border:1px solid #ccc; padding:10px; min-height:80px; border-radius:6px; position:relative; }
+.day:hover{background:#f5f5f5; cursor:pointer;}
+.weekday { background:#eee; font-weight:bold; }
+.modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); justify-content:center; align-items:center; }
+.modal-content { background:#fff; padding:20px; width:500px; max-height:80vh; overflow-y:auto; border-radius:8px; text-align:left; }
+.close { float:right; cursor:pointer; font-weight:bold; }
+.event { padding:5px; margin:5px 0; border-radius:5px; color:#fff; cursor:pointer; }
+.event-details { display:flex; flex-wrap:wrap; gap:5px; align-items:center; }
+button { margin:2px; padding:4px 8px; cursor:pointer; border-radius:4px; }
+.nav { margin-bottom:10px; }
+.notif { position:absolute; top:5px; right:5px; width:20px; height:20px; background:red; color:#fff; border-radius:50%; display:flex; justify-content:center; align-items:center; font-size:12px; font-weight:bold; cursor:default; }
+.new-event { animation: highlight 1s ease-out; }
+@keyframes highlight { 0% { background-color: #ffeb3b; } 50% { background-color: #ffc107; } 100% { background-color: transparent; } }
+.holiday { background-color: #f44336; color: white; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>Agenda da Carol</h1>
+<div class="nav">
+  <button id="prevBtn">« Mês Anterior</button>
+  <span id="currentMonth"></span>
+  <button id="nextBtn">Próximo Mês »</button>
+</div>
+
+<div class="calendar-container">
+  <div class="calendar" id="calendar"></div>
+</div>
+
+<div id="eventModal" class="modal">
+  <div class="modal-content">
+    <span class="close" id="closeModal">&times;</span>
+    <h2 id="modalDate"></h2>
+    <div id="eventList" style="max-height:60vh; overflow-y:auto;"></div>
+    <div id="adminControls">
+      <input type="text" id="eventTitle" placeholder="Título do evento"><br><br>
+      <input type="time" id="eventTime"><br><br>
+      <button id="saveEventBtn">Salvar</button>
+      <button id="cancelEditBtn">Cancelar Edição</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+
+<script>
+// ---------------- Firebase ----------------
+const firebaseConfig = {
+  apiKey: "AIzaSyBb2Xjs47vWwiEuLXZunSu67oKzdKYvMeY",
+  authDomain: "agenda-fbf45.firebaseapp.com",
+  projectId: "agenda-fbf45",
+  storageBucket: "agenda-fbf45.appspot.com",
+  messagingSenderId: "1061170361684",
+  appId: "1:1061170361684:web:3a9f86cd7f3fce840a44c1"
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+
+// ---------------- Variáveis ----------------
+let selectedDate=null;
+let editingId=null;
+let colorIndex=0;
+const colors=["#007BFF","#28A745","#DC3545","#FFC107","#6610f2","#20c997","#fd7e14"];
+let currentMonth=new Date().getMonth();
+let currentYear=new Date().getFullYear();
+const weekdays=["Dom","Seg","Ter","Qua","Qui","Sex","Sáb"];
+let unsubscribeGlobal = null;
+
+// ---------------- Util ----------------
+function pad(n){ return String(n).padStart(2,'0'); }
+
+// ---------------- Calendar ----------------
+function generateCalendar() {
+  const calendar = document.getElementById("calendar");
+  calendar.innerHTML = "";
+  document.getElementById("currentMonth").innerText = new Date(currentYear,currentMonth).toLocaleString('pt-BR',{month:'long',year:'numeric'});
+
+  weekdays.forEach(day => {
+    const div = document.createElement("div");
+    div.className = "weekday";
+    div.innerText = day;
+    calendar.appendChild(div);
+  });
+
+  const firstDay = new Date(currentYear,currentMonth,1).getDay();
+  const lastDate = new Date(currentYear,currentMonth+1,0).getDate();
+
+  for(let i=0;i<firstDay;i++) calendar.appendChild(document.createElement("div"));
+
+  for(let day=1; day<=lastDate; day++){
+    const dateKey = `${currentYear}-${pad(currentMonth+1)}-${pad(day)}`;
+    const div = document.createElement("div");
+    div.className="day";
+    div.innerText=day;
+    div.dataset.date = dateKey;
+    div.onclick = () => openModal(dateKey);
+    calendar.appendChild(div);
+  }
+
+  updateCalendarBadges();
+}
+
+// ---------------- Atualiza badges do calendário ----------------
+function updateCalendarBadges(){
+  db.collection("eventos").onSnapshot(snapshot=>{
+    const eventsByDate = {};
+    snapshot.forEach(doc=>{
+      const data = doc.data();
+      if(!eventsByDate[data.date]) eventsByDate[data.date]=[];
+      eventsByDate[data.date].push(data);
+    });
+
+    document.querySelectorAll(".day").forEach(dayEl=>{
+      const date = dayEl.dataset.date;
+      let notif = dayEl.querySelector(".notif");
+      if(eventsByDate[date]){
+        if(!notif){ notif=document.createElement("div"); notif.className="notif"; dayEl.appendChild(notif); }
+        notif.innerText = eventsByDate[date].length;
+      } else { if(notif) notif.remove(); }
+    });
+  });
+}
+
+// ---------------- Modal ----------------
+function openModal(date){
+  selectedDate = date;
+  editingId = null;
+  document.getElementById("modalDate").innerText = `Eventos de ${date}`;
+  document.getElementById("eventTitle").value = "";
+  document.getElementById("eventTime").value = "";
+  document.getElementById("eventModal").style.display = "flex";
+
+  if(unsubscribeGlobal) unsubscribeGlobal();
+  unsubscribeGlobal = db.collection("eventos").where("date","==",selectedDate).onSnapshot(snapshot=>{
+    loadEventsModal(snapshot);
+    updateCalendarBadges();
+  });
+}
+
+document.getElementById("closeModal").onclick = ()=>{ document.getElementById("eventModal").style.display='none'; };
+
+// ---------------- Navegação ----------------
+document.getElementById("prevBtn").onclick = ()=>{
+  currentMonth--; if(currentMonth<0){currentMonth=11; currentYear--; } generateCalendar();
+};
+document.getElementById("nextBtn").onclick = ()=>{
+  currentMonth++; if(currentMonth>11){currentMonth=0; currentYear++; } generateCalendar();
+};
+
+// ---------------- Salvar evento ----------------
+document.getElementById("saveEventBtn").onclick = async ()=>{
+  const title = document.getElementById("eventTitle").value.trim();
+  const time = document.getElementById("eventTime").value;
+  if(!title){ alert("Digite um título!"); return; }
+
+  let color = colors[colorIndex % colors.length];
+  colorIndex++;
+
+  if(editingId){
+    const docRef = db.collection("eventos").doc(editingId);
+    await docRef.update({title,time,color});
+  } else {
+    await db.collection("eventos").add({date:selectedDate,title,time,color});
+  }
+
+  document.getElementById("eventTitle").value="";
+  document.getElementById("eventTime").value="";
+};
+
+// ---------------- Cancelar edição ----------------
+document.getElementById("cancelEditBtn").onclick = ()=>{
+  editingId = null;
+  document.getElementById("eventTitle").value="";
+  document.getElementById("eventTime").value="";
+};
+
+// ---------------- Carrega eventos no modal ----------------
+function loadEventsModal(snapshot){
+  const list = document.getElementById("eventList");
+  list.innerHTML="";
+
+  snapshot.docs.sort((a,b)=>{
+    const ta = a.data().time||"99:99";
+    const tb = b.data().time||"99:99";
+    return ta.localeCompare(tb);
+  }).forEach(doc=>{
+    const ev = doc.data();
+    const div = document.createElement("div");
+    div.className="event";
+    div.style.backgroundColor = ev.color;
+
+    const text = document.createElement("span");
+    text.innerText = `${ev.time?ev.time+" - ":""}${ev.title}`;
+    div.appendChild(text);
+
+    list.appendChild(div);
+  });
+}
+
+// ---------------- Inicial ----------------
+generateCalendar();
+</script>
+
+</body>
+</html>
